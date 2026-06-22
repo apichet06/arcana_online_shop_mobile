@@ -1,31 +1,303 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import 'package:arcana_online_shop_mobile/features/product_shop/data/product_shop_repository.dart';
+import 'package:arcana_online_shop_mobile/features/product_shop/domain/product.dart';
+import 'package:arcana_online_shop_mobile/features/product_shop/presentation/product_variant_page.dart';
+import 'package:arcana_online_shop_mobile/features/product_shop/presentation/widgets/product_card.dart';
+import 'package:arcana_online_shop_mobile/features/auth/data/auth_session.dart';
+import 'package:arcana_online_shop_mobile/features/auth/presentation/login_page.dart';
+import 'package:arcana_online_shop_mobile/features/storefront/application/storefront_search_coordinator.dart';
+import 'package:arcana_online_shop_mobile/l10n/app_localizations.dart';
+
+import '../domain/storefront_category.dart';
+import '../domain/storefront_language.dart';
 import '../domain/storefront_type.dart';
-import 'storefront_tab.dart';
 
 class StorefrontShellPage extends StatefulWidget {
-  const StorefrontShellPage({super.key});
+  const StorefrontShellPage({
+    super.key,
+    required this.selectedLanguage,
+    required this.onLanguageChanged,
+  });
+
+  final StorefrontLanguage selectedLanguage;
+  final ValueChanged<StorefrontLanguage> onLanguageChanged;
 
   @override
   State<StorefrontShellPage> createState() => _StorefrontShellPageState();
 }
 
 class _StorefrontShellPageState extends State<StorefrontShellPage> {
+  // จำนวนสินค้าที่โหลดต่อ 1 หน้า ใช้กับ pagination/infinite scroll
+  static const int _pageSize = 10;
+
+  // Repository ใช้เรียก API ของ storefront และสินค้า
+  final ProductShopRepository _repository = ProductShopRepository();
+  final StorefrontSearchCoordinator _searchCoordinator =
+      StorefrontSearchCoordinator.instance;
+  // Controller สำหรับฟังตำแหน่ง scroll เพื่อโหลดสินค้าเพิ่มเมื่อใกล้ท้ายหน้า
+  final ScrollController _scrollController = ScrollController();
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  Timer? _searchDebounce;
+
+  // State หลักของหน้า storefront
   StorefrontType _selectedType = StorefrontType.arcana;
+  late StorefrontLanguage _selectedLanguage;
+  int _selectedFooterIndex = 0;
+  int? _selectedCategoryId;
+  String _searchKeyword = '';
+  List<StorefrontCategory> _categories = const [];
+  List<Product> _products = const [];
+  int _currentPage = 1;
+  bool _hasNextPage = false;
+  bool _isInitialLoading = true;
+  bool _isLoadingMore = false;
+  Object? _loadError;
+  int _loadRequestId = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // รับค่าภาษาตั้งต้นจาก widget แม่ แล้วเริ่มโหลดข้อมูลหน้าแรก
+    _selectedLanguage = widget.selectedLanguage;
+    _scrollController.addListener(_handleScroll);
+    _searchCoordinator.addListener(_focusSearch);
+    _loadInitialStorefront();
+  }
+
+  @override
+  void didUpdateWidget(covariant StorefrontShellPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    // ถ้า widget แม่เปลี่ยนภาษา ให้ sync state ในหน้านี้และโหลดข้อมูลใหม่
+    if (oldWidget.selectedLanguage != widget.selectedLanguage &&
+        _selectedLanguage != widget.selectedLanguage) {
+      _selectedLanguage = widget.selectedLanguage;
+      _selectedCategoryId = null;
+      _loadInitialStorefront();
+    }
+  }
+
+  @override
+  void dispose() {
+    // ถอด listener และ dispose controller เพื่อกัน memory leak
+    _searchCoordinator.removeListener(_focusSearch);
+    _scrollController
+      ..removeListener(_handleScroll)
+      ..dispose();
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadInitialStorefront() async {
+    final requestId = ++_loadRequestId;
+
+    // โหลด storefront ใหม่ตั้งแต่หน้าแรก ใช้ตอนเข้าเพจ เปลี่ยนภาษา เปลี่ยนร้าน หรือเปลี่ยนหมวดหมู่
+    setState(() {
+      _isInitialLoading = true;
+      _isLoadingMore = false;
+      _loadError = null;
+      _currentPage = 1;
+      _hasNextPage = false;
+      _products = const [];
+    });
+
+    try {
+      // getStorefront คืนทั้งหมวดหมู่และสินค้า page แรก
+      final data = await _repository.getStorefront(
+        type: _selectedType,
+        languageCode: _selectedLanguage.code,
+        categoryId: _selectedCategoryId,
+        keyword: _searchKeyword,
+        page: 1,
+        limit: _pageSize,
+      );
+
+      // ถ้า widget ถูกปิดไปก่อน API ตอบกลับ ไม่ต้อง setState
+      if (!mounted || requestId != _loadRequestId) return;
+
+      setState(() {
+        _categories = data.categories;
+        _products = data.productPage.items;
+        _currentPage = data.productPage.pagination.page;
+        _hasNextPage = data.productPage.pagination.hasNextPage;
+        _isInitialLoading = false;
+      });
+    } catch (error) {
+      // เก็บ error ไว้ให้ UI แสดงปุ่ม retry
+      if (!mounted || requestId != _loadRequestId) return;
+
+      setState(() {
+        _loadError = error;
+        _isInitialLoading = false;
+      });
+    }
+  }
+
+  Future<void> _loadMoreProducts() async {
+    // กันยิงซ้ำระหว่างโหลด หรือถ้าไม่มีหน้าถัดไปแล้ว
+    if (_isInitialLoading || _isLoadingMore || !_hasNextPage) return;
+    final requestId = _loadRequestId;
+
+    setState(() => _isLoadingMore = true);
+
+    try {
+      // โหลดสินค้าเฉพาะหน้าถัดไป แล้วนำมาต่อท้าย list เดิม
+      final page = await _repository.getProducts(
+        type: _selectedType,
+        languageCode: _selectedLanguage.code,
+        categoryId: _selectedCategoryId,
+        keyword: _searchKeyword,
+        page: _currentPage + 1,
+        limit: _pageSize,
+      );
+
+      if (!mounted || requestId != _loadRequestId) return;
+
+      setState(() {
+        // spread list เดิม + list ใหม่ เพื่อให้ grid แสดงสินค้าเพิ่ม
+        _products = [..._products, ...page.items];
+        _currentPage = page.pagination.page;
+        _hasNextPage = page.pagination.hasNextPage;
+        _isLoadingMore = false;
+      });
+    } catch (_) {
+      if (!mounted || requestId != _loadRequestId) return;
+      setState(() => _isLoadingMore = false);
+    }
+  }
+
+  void _handleScroll() {
+    // Infinite scroll ใช้เฉพาะหน้า Home เท่านั้น
+    if (_selectedFooterIndex != 0) return;
+    if (!_scrollController.hasClients) return;
+    // extentAfter คือระยะ scroll ที่เหลือด้านล่าง ถ้าน้อยกว่า 500px ให้โหลดเพิ่ม
+    if (_scrollController.position.extentAfter < 500) {
+      _loadMoreProducts();
+    }
+  }
+
+  void _selectType(StorefrontType type) {
+    if (_selectedType == type) return;
+
+    // เปลี่ยนระหว่าง Arcana/Deadstock แล้ว reset category ก่อนโหลดใหม่
+    setState(() {
+      _selectedType = type;
+      _selectedCategoryId = null;
+    });
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+      );
+    }
+    _loadInitialStorefront();
+  }
+
+  void _selectLanguage(StorefrontLanguage language) {
+    if (_selectedLanguage == language) return;
+
+    // เปลี่ยนภาษาในหน้านี้ แจ้ง widget แม่ และโหลดข้อมูลตามภาษาใหม่
+    setState(() {
+      _selectedLanguage = language;
+      _selectedCategoryId = null;
+    });
+    widget.onLanguageChanged(language);
+    _loadInitialStorefront();
+  }
+
+  void _selectCategory(int? categoryId) {
+    if (_selectedCategoryId == categoryId) return;
+
+    // categoryId เป็น null หมายถึง "ทุกหมวดหมู่"
+    setState(() {
+      _selectedCategoryId = categoryId;
+    });
+    _loadInitialStorefront();
+  }
+
+  void _focusSearch() {
+    setState(() => _selectedFooterIndex = 0);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          0,
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+        );
+      }
+      _searchFocusNode.requestFocus();
+    });
+  }
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 450), () {
+      final keyword = value.trim();
+      if (_searchKeyword == keyword) return;
+      setState(() => _searchKeyword = keyword);
+      _loadInitialStorefront();
+    });
+  }
+
+  void _submitSearch(String value) {
+    _searchDebounce?.cancel();
+    final keyword = value.trim();
+    if (_searchKeyword == keyword) return;
+    setState(() => _searchKeyword = keyword);
+    _loadInitialStorefront();
+  }
+
+  void _clearSearch() {
+    if (_searchController.text.isEmpty && _searchKeyword.isEmpty) return;
+    _searchDebounce?.cancel();
+    _searchController.clear();
+    setState(() => _searchKeyword = '');
+    _loadInitialStorefront();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isArcana = _selectedType == StorefrontType.arcana;
+    final l10n = AppLocalizations.of(context);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Arcana Shop'),
+        title: _HeaderLogo(title: l10n.appTitle),
         actions: [
-          IconButton(
-            onPressed: () {},
-            icon: const Icon(Icons.search),
-            tooltip: 'Search',
+          PopupMenuButton<StorefrontLanguage>(
+            initialValue: _selectedLanguage,
+            onSelected: _selectLanguage,
+            tooltip: 'Language',
+            itemBuilder: (context) => [
+              for (final language in StorefrontLanguage.values)
+                PopupMenuItem(value: language, child: Text(language.label)),
+            ],
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  _selectedLanguage.label,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleMedium?.copyWith(fontSize: 13),
+                ),
+              ),
+            ),
           ),
+          if (_selectedFooterIndex != 0)
+            IconButton(
+              onPressed: _focusSearch,
+              icon: const Icon(Icons.search),
+              tooltip: 'Search',
+            ),
           IconButton(
             onPressed: () {},
             icon: const Icon(Icons.shopping_bag_outlined),
@@ -33,25 +305,165 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
           ),
         ],
       ),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      body: SafeArea(child: _buildSelectedBody(context, l10n)),
+      bottomNavigationBar: NavigationBar(
+        // index นี้ใช้เลือก body หลักของหน้า เช่น Home/Notification/Chat/Profile
+        selectedIndex: _selectedFooterIndex,
+        onDestinationSelected: (index) {
+          setState(() => _selectedFooterIndex = index);
+        },
+        destinations: [
+          NavigationDestination(
+            icon: const Icon(Icons.home_outlined),
+            selectedIcon: const Icon(Icons.home),
+            label: l10n.homeNavLabel,
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.notifications_outlined),
+            selectedIcon: const Icon(Icons.notifications),
+            label: l10n.notificationsNavLabel,
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.chat_bubble_outline),
+            selectedIcon: const Icon(Icons.chat_bubble),
+            label: l10n.chat,
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.person_outline),
+            selectedIcon: const Icon(Icons.person),
+            label: l10n.profileNavLabel,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSelectedBody(BuildContext context, AppLocalizations l10n) {
+    // สลับเนื้อหาตาม bottom navigation
+    switch (_selectedFooterIndex) {
+      case 1:
+        return _EmptyMainTab(
+          icon: Icons.notifications_outlined,
+          title: l10n.notificationsTitle,
+        );
+      case 2:
+        return _EmptyMainTab(icon: Icons.chat_bubble_outline, title: l10n.chat);
+      case 3:
+        return const _AccountTab();
+      case 0:
+      default:
+        return _buildHomeBody(context, l10n);
+    }
+  }
+
+  Widget _buildHomeBody(BuildContext context, AppLocalizations l10n) {
+    final isArcana = _selectedType == StorefrontType.arcana;
+    final String sectionTitle;
+    if (_searchKeyword.isNotEmpty) {
+      sectionTitle = 'ผลการค้นหา "$_searchKeyword"';
+    } else if (isArcana) {
+      sectionTitle = l10n.curatedForYou;
+    } else {
+      sectionTitle = l10n.freshStockDrops;
+    }
+
+    // ใช้ ListView ตัวเดียวครอบ hero/category/grid เพื่อให้ scroll controller ตรวจ infinite scroll ได้ง่าย
+    return ListView(
+      controller: _scrollController,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      children: [
+        _HeroSection(
+          type: _selectedType,
+          onShopPressed: () {
+            _selectType(
+              isArcana ? StorefrontType.deadstock : StorefrontType.arcana,
+            );
+          },
+        ),
+        const SizedBox(height: 18),
+        _QuickActions(type: _selectedType),
+        const SizedBox(height: 22),
+        _ProductSearchField(
+          controller: _searchController,
+          focusNode: _searchFocusNode,
+          onChanged: _onSearchChanged,
+          onSubmitted: _submitSearch,
+          onClear: _clearSearch,
+        ),
+        const SizedBox(height: 22),
+        if (_isInitialLoading)
+          const _StorefrontLoading()
+        else if (_loadError != null)
+          // ถ้าโหลดหน้าแรกไม่สำเร็จ แสดง error พร้อมปุ่ม retry
+          _StorefrontError(onRetry: _loadInitialStorefront)
+        else ...[
+          _CategoryScroller(
+            categories: _categories,
+            selectedCategoryId: _selectedCategoryId,
+            onSelected: _selectCategory,
+          ),
+          const SizedBox(height: 22),
+          Text(sectionTitle, style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: 12),
+          _ProductPreviewGrid(
+            products: _products,
+            language: _selectedLanguage,
+            resolveImageUrl: _repository.resolveAssetUrl,
+          ),
+          // spinner เล็กด้านล่าง ใช้ตอนโหลด page ถัดไป
+          if (_isLoadingMore) const _LoadingMoreProducts(),
+        ],
+      ],
+    );
+  }
+}
+
+class _HeaderLogo extends StatelessWidget {
+  const _HeaderLogo({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    // Logo บน AppBar: รูปไอคอนแอป + ชื่อแอปจาก localization
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ClipOval(
+          child: Image.asset(
+            'assets/image/app_icon.jpg',
+            width: 34,
+            height: 34,
+            fit: BoxFit.cover,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Flexible(
+          child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+      ],
+    );
+  }
+}
+
+class _EmptyMainTab extends StatelessWidget {
+  const _EmptyMainTab({required this.icon, required this.title});
+
+  final IconData icon;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    // Placeholder สำหรับ tab ที่ยังไม่มีหน้าจริง เช่น notification/chat/profile
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            _StorefrontSwitcher(
-              selectedType: _selectedType,
-              onChanged: (type) => setState(() => _selectedType = type),
-            ),
-            const SizedBox(height: 18),
-            _HeroSection(type: _selectedType),
-            const SizedBox(height: 18),
-            _QuickActions(type: _selectedType),
-            const SizedBox(height: 22),
-            Text(
-              isArcana ? 'Curated for you' : 'Fresh stock drops',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
+            Icon(icon, size: 42, color: Theme.of(context).colorScheme.primary),
             const SizedBox(height: 12),
-            _ProductPreviewGrid(type: _selectedType),
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
           ],
         ),
       ),
@@ -59,56 +471,269 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
   }
 }
 
-class _StorefrontSwitcher extends StatelessWidget {
-  const _StorefrontSwitcher({
-    required this.selectedType,
-    required this.onChanged,
-  });
-
-  final StorefrontType selectedType;
-  final ValueChanged<StorefrontType> onChanged;
+class _AccountTab extends StatelessWidget {
+  const _AccountTab();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFE4E0D6)),
+    return AnimatedBuilder(
+      animation: AuthSession.instance,
+      builder: (context, _) {
+        final session = AuthSession.instance;
+        if (!session.isLoggedIn) {
+          return _LoginPrompt(onLoginPressed: () => _openLogin(context));
+        }
+
+        final user = session.user!;
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 24, 16, 32),
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 30,
+                  backgroundColor: Theme.of(context).colorScheme.primary,
+                  child: Text(
+                    _initialFor(user.username),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 22,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        user.username,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        user.email,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            _AccountMenuItem(
+              icon: Icons.person_outline,
+              title: 'ข้อมูลส่วนตัว',
+              onTap: () {},
+            ),
+            _AccountMenuItem(
+              icon: Icons.location_on_outlined,
+              title: 'ที่อยู่จัดส่ง',
+              onTap: () {},
+            ),
+            _AccountMenuItem(
+              icon: Icons.receipt_long_outlined,
+              title: 'การซื้อของฉัน',
+              onTap: () {},
+            ),
+            const SizedBox(height: 14),
+            OutlinedButton.icon(
+              onPressed: AuthSession.instance.logout,
+              icon: const Icon(Icons.logout),
+              label: const Text('ออกจากระบบ'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _openLogin(BuildContext context) async {
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const LoginPage()));
+  }
+
+  String _initialFor(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return 'A';
+    return trimmed.substring(0, 1).toUpperCase();
+  }
+}
+
+class _LoginPrompt extends StatelessWidget {
+  const _LoginPrompt({required this.onLoginPressed});
+
+  final VoidCallback onLoginPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.person_outline,
+              size: 44,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'บัญชีของฉัน',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'เข้าสู่ระบบเพื่อดูข้อมูลบัญชี ที่อยู่จัดส่ง และคำสั่งซื้อของคุณ',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: onLoginPressed,
+              icon: const Icon(Icons.login),
+              label: const Text('เข้าสู่ระบบ'),
+            ),
+          ],
+        ),
       ),
-      child: Row(
-        children: [
-          StorefrontTab(
-            type: StorefrontType.arcana,
-            selected: selectedType == StorefrontType.arcana,
-            onTap: () => onChanged(StorefrontType.arcana),
-          ),
-          StorefrontTab(
-            type: StorefrontType.deadstock,
-            selected: selectedType == StorefrontType.deadstock,
-            onTap: () => onChanged(StorefrontType.deadstock),
-          ),
-        ],
+    );
+  }
+}
+
+class _AccountMenuItem extends StatelessWidget {
+  const _AccountMenuItem({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        leading: Icon(icon),
+        title: Text(title),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: onTap,
+      ),
+    );
+  }
+}
+
+class _ProductSearchField extends StatelessWidget {
+  const _ProductSearchField({
+    required this.controller,
+    required this.focusNode,
+    required this.onChanged,
+    required this.onSubmitted,
+    required this.onClear,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final ValueChanged<String> onChanged;
+  final ValueChanged<String> onSubmitted;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      focusNode: focusNode,
+      textInputAction: TextInputAction.search,
+      onChanged: onChanged,
+      onSubmitted: onSubmitted,
+      decoration: InputDecoration(
+        hintText: 'ค้นหาสินค้า',
+        prefixIcon: const Icon(Icons.search),
+        suffixIcon: ValueListenableBuilder<TextEditingValue>(
+          valueListenable: controller,
+          builder: (context, value, _) {
+            if (value.text.isEmpty) return const SizedBox.shrink();
+            return IconButton(
+              onPressed: onClear,
+              icon: const Icon(Icons.close),
+              tooltip: 'Clear search',
+            );
+          },
+        ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
+  }
+}
+
+class _CategoryScroller extends StatelessWidget {
+  const _CategoryScroller({
+    required this.categories,
+    required this.selectedCategoryId,
+    required this.onSelected,
+  });
+
+  final List<StorefrontCategory> categories;
+  final int? selectedCategoryId;
+  final ValueChanged<int?> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    if (categories.isEmpty) return const SizedBox.shrink();
+    final l10n = AppLocalizations.of(context);
+
+    // แถบหมวดหมู่แนวนอน มี chip แรกเป็น "ทั้งหมด"
+    return SizedBox(
+      height: 42,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: categories.length + 1,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final isAll = index == 0;
+          final category = isAll ? null : categories[index - 1];
+          final selected = isAll
+              ? selectedCategoryId == null
+              : selectedCategoryId == category!.id;
+
+          // ChoiceChip ที่ถูกเลือกจะใช้กรองสินค้าแล้วโหลดหน้าแรกใหม่
+          return ChoiceChip(
+            selected: selected,
+            label: Text(isAll ? l10n.allCategories : category!.name),
+            onSelected: (_) => onSelected(isAll ? null : category!.id),
+          );
+        },
       ),
     );
   }
 }
 
 class _HeroSection extends StatelessWidget {
-  const _HeroSection({required this.type});
+  const _HeroSection({required this.type, required this.onShopPressed});
 
   final StorefrontType type;
+  final VoidCallback onShopPressed;
 
   @override
   Widget build(BuildContext context) {
     final isArcana = type == StorefrontType.arcana;
+    // Hero เปลี่ยนสีและข้อความตามประเภท storefront ที่เลือก
     final background = isArcana
         ? const Color(0xFF0F4C81)
         : const Color(0xFF332F2A);
     final accent = isArcana ? const Color(0xFF9ED8FF) : const Color(0xFFFFB457);
 
     return Container(
-      constraints: const BoxConstraints(minHeight: 230),
+      constraints: const BoxConstraints(minHeight: 170),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: background,
@@ -136,24 +761,26 @@ class _HeroSection extends StatelessWidget {
           const SizedBox(height: 18),
           Text(
             isArcana ? 'Arcana Premium' : 'Deadstock Deals',
-            style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-              color: Colors.white,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.headlineLarge?.copyWith(color: Colors.white),
           ),
           const SizedBox(height: 10),
           Text(
             isArcana
                 ? 'สินค้าคัดพิเศษสำหรับสุขภาพ ไลฟ์สไตล์ และของใช้คุณภาพสูง'
                 : 'สินค้า stock พิเศษ ราคาดี จำนวนจำกัด พร้อมให้เลือกก่อนหมด',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: const Color(0xD1FFFFFF),
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: const Color(0xD1FFFFFF)),
           ),
           const SizedBox(height: 20),
           FilledButton.icon(
-            onPressed: () {},
-            icon: const Icon(Icons.arrow_forward),
-            label: Text(isArcana ? 'Shop Premium' : 'Browse Deals'),
+            onPressed: onShopPressed,
+            icon: Icon(
+              isArcana ? Icons.storefront_outlined : Icons.spa_outlined,
+            ),
+            label: Text(isArcana ? 'Shop Deadstock' : 'Shop Arcana'),
             style: FilledButton.styleFrom(
               backgroundColor: Colors.white,
               foregroundColor: background,
@@ -174,6 +801,7 @@ class _QuickActions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isArcana = type == StorefrontType.arcana;
+    // Quick action เป็นข้อความสั้นๆ ด้านใต้ hero เปลี่ยนตาม Arcana/Deadstock
     final items = isArcana
         ? const [
             _QuickActionData(Icons.spa_outlined, 'Wellness'),
@@ -218,9 +846,9 @@ class _QuickActionCard extends StatelessWidget {
               item.label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontSize: 12,
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontSize: 12),
             ),
           ],
         ),
@@ -230,23 +858,23 @@ class _QuickActionCard extends StatelessWidget {
 }
 
 class _ProductPreviewGrid extends StatelessWidget {
-  const _ProductPreviewGrid({required this.type});
+  const _ProductPreviewGrid({
+    required this.products,
+    required this.language,
+    required this.resolveImageUrl,
+  });
 
-  final StorefrontType type;
+  final List<Product> products;
+  final StorefrontLanguage language;
+  final String Function(String? value) resolveImageUrl;
 
   @override
   Widget build(BuildContext context) {
-    final isArcana = type == StorefrontType.arcana;
-    final products = isArcana
-        ? const [
-            _ProductPreview('Organic daily care', '฿1,290', Color(0xFFD8E9F8)),
-            _ProductPreview('Premium supplement', '฿890', Color(0xFFE6EEF8)),
-          ]
-        : const [
-            _ProductPreview('Factory overstock set', '฿490', Color(0xFFE4D2BD)),
-            _ProductPreview('Clearance tool kit', '฿690', Color(0xFFD4D9E3)),
-          ];
+    if (products.isEmpty) {
+      return const _EmptyProducts();
+    }
 
+    // Grid สินค้า 2 คอลัมน์ ปิด scroll ของตัวเองเพื่อให้ ListView แม่เป็นคน scroll
     return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
@@ -255,59 +883,44 @@ class _ProductPreviewGrid extends StatelessWidget {
         crossAxisCount: 2,
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
-        childAspectRatio: 0.78,
+        childAspectRatio: 0.70,
       ),
       itemBuilder: (context, index) => _ProductPreviewCard(
         product: products[index],
+        imageUrl: resolveImageUrl(products[index].imageUrl),
+        language: language,
       ),
     );
   }
 }
 
 class _ProductPreviewCard extends StatelessWidget {
-  const _ProductPreviewCard({required this.product});
+  const _ProductPreviewCard({
+    required this.product,
+    required this.imageUrl,
+    required this.language,
+  });
 
-  final _ProductPreview product;
+  final Product product;
+  final String imageUrl;
+  final StorefrontLanguage language;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              color: product.color,
-              child: const Icon(Icons.shopping_bag_outlined, size: 42),
+    return ProductCard(
+      product: product,
+      imageUrl: imageUrl,
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ProductVariantPage(
+              product: product,
+              language: language,
+              initialImageUrl: imageUrl,
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  product.name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontSize: 13,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  product.price,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -319,10 +932,73 @@ class _QuickActionData {
   final String label;
 }
 
-class _ProductPreview {
-  const _ProductPreview(this.name, this.price, this.color);
+class _StorefrontLoading extends StatelessWidget {
+  const _StorefrontLoading();
 
-  final String name;
-  final String price;
-  final Color color;
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 32),
+      child: Center(child: CircularProgressIndicator()),
+    );
+  }
+}
+
+class _StorefrontError extends StatelessWidget {
+  const _StorefrontError({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 28),
+      child: Column(
+        children: [
+          const Icon(Icons.wifi_off_outlined, size: 36),
+          const SizedBox(height: 10),
+          Text(l10n.loadError, style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 12),
+          OutlinedButton(onPressed: onRetry, child: Text(l10n.retry)),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyProducts extends StatelessWidget {
+  const _EmptyProducts();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 28),
+      child: Center(
+        child: Text(
+          l10n.emptyProducts,
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+      ),
+    );
+  }
+}
+
+class _LoadingMoreProducts extends StatelessWidget {
+  const _LoadingMoreProducts();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 18),
+      child: Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2.4),
+        ),
+      ),
+    );
+  }
 }

@@ -17,6 +17,10 @@ class StorefrontTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final label = switch (type) {
+      StorefrontType.arcana => 'Arcana',
+      StorefrontType.deadstock => 'Deadstock',
+    };
 
     return Expanded(
       child: Padding(
@@ -31,7 +35,7 @@ class StorefrontTab extends StatelessWidget {
               height: 44,
               child: Center(
                 child: Text(
-                  type.title,
+                  label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(

@@ -7,6 +7,7 @@ class AppTheme {
     const seed = Color.fromARGB(255, 15, 76, 129);
 
     return ThemeData(
+      fontFamily: 'LINESeedSansTH',
       useMaterial3: true,
       colorScheme: ColorScheme.fromSeed(
         seedColor: seed,
@@ -20,6 +21,7 @@ class AppTheme {
         backgroundColor: Color(0xFFF5F8FC),
         foregroundColor: Color(0xFF101923),
       ),
+
       cardTheme: CardThemeData(
         color: Colors.white,
         elevation: 0,

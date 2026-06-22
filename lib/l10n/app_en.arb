@@ -1,0 +1,17 @@
+{
+  "@@locale": "en",
+  "appTitle": "Arcana Shop",
+  "allCategories": "All",
+  "curatedForYou": "Curated for you",
+  "freshStockDrops": "Fresh stock drops",
+  "loadProductsError": "Could not load products",
+  "retry": "Retry",
+  "emptyProducts": "No products in this category yet",
+  "loadError": "Could not load products",
+  "homeNavLabel": "Home",
+  "notificationsNavLabel": "notifications",
+  "profileNavLabel": "Me",
+  "notificationsTitle": "No notifications yet",
+  "profileTitle": "My account",
+  "chat": "Chat"
+}

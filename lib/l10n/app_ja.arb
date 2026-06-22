@@ -1,0 +1,17 @@
+{
+  "@@locale": "ja",
+  "appTitle": "Arcana Shop",
+  "allCategories": "すべて",
+  "curatedForYou": "おすすめ商品",
+  "freshStockDrops": "新着在庫",
+  "loadProductsError": "商品を読み込めませんでした",
+  "retry": "再試行",
+  "emptyProducts": "このカテゴリには商品がありません",
+  "loadError": "商品を読み込めませんでした",
+  "homeNavLabel": "ホーム",
+  "notificationsNavLabel": "通知",
+  "profileNavLabel": "マイページ",
+  "notificationsTitle": "通知はまだありません",
+  "profileTitle": "マイアカウント",
+  "chat": "チャット"
+}

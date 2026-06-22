@@ -1,0 +1,17 @@
+{
+  "@@locale": "th",
+  "appTitle": "Arcana Shop",
+  "allCategories": "ทั้งหมด",
+  "curatedForYou": "คัดสรรมาเพื่อคุณ",
+  "freshStockDrops": "สินค้าเข้าใหม่",
+  "loadProductsError": "โหลดสินค้าไม่สำเร็จ",
+  "retry": "ลองอีกครั้ง",
+  "emptyProducts": "ยังไม่มีสินค้าในหมวดนี้",
+  "loadError": "โหลดสินค้าไม่สำเร็จ",
+  "homeNavLabel": "หน้าแรก",
+  "notificationsNavLabel": "แจ้งเตือน",
+  "profileNavLabel": "ฉัน",
+  "notificationsTitle": "ยังไม่มีการแจ้งเตือน",
+  "profileTitle": "บัญชีของฉัน",
+  "chat": "แชท"
+}

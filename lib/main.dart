@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'app/arcana_app.dart';
+import 'features/auth/data/auth_session.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,6 +15,7 @@ Future<void> main() async {
       : defaultEnvFile;
 
   await dotenv.load(fileName: envFile);
+  await AuthSession.instance.initialize();
 
   runApp(const ArcanaApp());
 }

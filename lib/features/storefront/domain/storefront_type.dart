@@ -1,15 +1,12 @@
-enum StorefrontType {
-  arcana,
-  deadstock,
-}
+enum StorefrontType { arcana, deadstock }
 
 extension StorefrontTypeLabel on StorefrontType {
-  String get title {
+  int get catalogId {
     switch (this) {
       case StorefrontType.arcana:
-        return 'Arcana Premium';
+        return 1;
       case StorefrontType.deadstock:
-        return 'Deadstock';
+        return 2;
     }
   }
 }
