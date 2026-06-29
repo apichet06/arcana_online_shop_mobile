@@ -21,6 +21,7 @@ class ProductDetailData {
 class ProductDetail {
   const ProductDetail({
     required this.id,
+    required this.storeId,
     required this.name,
     required this.title,
     required this.description,
@@ -36,6 +37,8 @@ class ProductDetail {
   });
 
   final int id;
+  // st_id จาก API — ใช้เปิดห้องแชทกับร้านค้าร้านนี้โดยตรง
+  final int storeId;
   final String name;
   final String title;
   final String description;
@@ -54,6 +57,7 @@ class ProductDetail {
   factory ProductDetail.fromJson(Map<String, dynamic> json) {
     return ProductDetail(
       id: _asInt(json['p_id']),
+      storeId: _asInt(json['st_id']),
       name: (json['name'] ?? '').toString(),
       title: (json['title'] ?? '').toString(),
       description: (json['p_description'] ?? '').toString(),

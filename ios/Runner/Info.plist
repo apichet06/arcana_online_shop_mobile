@@ -49,6 +49,12 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>ใช้สำหรับบันทึก QR Code ลงคลังรูปภาพ</string>
+	<key>NSCameraUsageDescription</key>
+	<string>ใช้สำหรับถ่ายรูปประกอบคำขอคืนสินค้าและคืนเงิน</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ใช้สำหรับเลือกรูปประกอบคำขอคืนสินค้าและคืนเงิน</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

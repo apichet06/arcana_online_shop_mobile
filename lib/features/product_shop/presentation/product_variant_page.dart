@@ -1,5 +1,14 @@
 import 'package:flutter/material.dart';
 
+import 'package:arcana_online_shop_mobile/core/network/api_client.dart';
+import 'package:arcana_online_shop_mobile/features/auth/data/auth_session.dart';
+import 'package:arcana_online_shop_mobile/features/auth/presentation/login_page.dart';
+import 'package:arcana_online_shop_mobile/features/cart/application/cart_controller.dart';
+import 'package:arcana_online_shop_mobile/features/cart/presentation/cart_page.dart';
+import 'package:arcana_online_shop_mobile/features/checkout/presentation/checkout_page.dart';
+import 'package:arcana_online_shop_mobile/features/chat/application/chat_controller.dart';
+import 'package:arcana_online_shop_mobile/features/chat/data/chat_api.dart';
+import 'package:arcana_online_shop_mobile/features/chat/presentation/conversation_messages_page.dart';
 import 'package:arcana_online_shop_mobile/features/product_shop/data/product_shop_repository.dart';
 import 'package:arcana_online_shop_mobile/features/product_shop/domain/product.dart';
 import 'package:arcana_online_shop_mobile/features/product_shop/domain/product_detail.dart';
@@ -29,6 +38,11 @@ class ProductVariantPage extends StatefulWidget {
 
 class _ProductVariantPageState extends State<ProductVariantPage> {
   final ProductShopRepository _repository = ProductShopRepository();
+  final ChatApi _chatApi = ChatApi();
+  // ChatController สำหรับ socket ของหน้านี้ — ใช้รับ/ส่ง realtime ใน ConversationMessagesPage
+  final ChatController _chatController = ChatController();
+  // ป้องกันส่ง product context ซ้ำภายใน session เดียวกัน (เหมือน autoSentProductRef ฝั่ง web)
+  int? _chatSentForProductId;
   late final PageController _imagePageController;
 
   ProductDetailData? _data;
@@ -46,6 +60,7 @@ class _ProductVariantPageState extends State<ProductVariantPage> {
   bool _reviewsHasMore = false;
   int _reviewsPage = 1;
   bool _relatedLoading = false;
+  bool _buyingNow = false;
 
   @override
   void initState() {
@@ -53,11 +68,14 @@ class _ProductVariantPageState extends State<ProductVariantPage> {
     _selectedImageUrl = widget.initialImageUrl;
     _imagePageController = PageController();
     _loadProduct();
+    // เชื่อม socket chat ทันทีหากล็อกอินอยู่แล้ว เพื่อรับข้อความ realtime เมื่อเปิดแชท
+    _chatController.syncWithSession();
   }
 
   @override
   void dispose() {
     _imagePageController.dispose();
+    _chatController.dispose();
     super.dispose();
   }
 
@@ -334,9 +352,25 @@ class _ProductVariantPageState extends State<ProductVariantPage> {
             icon: const Icon(Icons.search),
             tooltip: 'Search',
           ),
+          // Cart icon พร้อม badge จำนวน item — rebuild อัตโนมัติเมื่อ cart เปลี่ยน
           IconButton(
-            onPressed: () {},
-            icon: const Icon(Icons.shopping_bag_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => CartPage(lgCode: widget.language.code),
+              ),
+            ),
+            icon: AnimatedBuilder(
+              animation: CartController.instance,
+              builder: (context, child) {
+                final count = CartController.instance.itemCount;
+                if (count <= 0) return child!;
+                return Badge.count(
+                  count: count > 99 ? 99 : count,
+                  child: child!,
+                );
+              },
+              child: const Icon(Icons.shopping_bag_outlined),
+            ),
             tooltip: 'Cart',
           ),
         ],
@@ -350,6 +384,7 @@ class _ProductVariantPageState extends State<ProductVariantPage> {
       ),
       bottomNavigationBar: _ProductActionFooter(
         isLoading: _loading,
+        isBuyingNow: _buyingNow,
         variant: _selectedVariant,
         onChat: _handleChat,
         onAddToCart: _handleAddToCart,
@@ -358,27 +393,167 @@ class _ProductVariantPageState extends State<ProductVariantPage> {
     );
   }
 
-  void _handleChat() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('เปิดแชทร้านค้า')),
-    );
+  // เปิดแชทกับร้านค้าของสินค้านี้ — get-or-create conversation แล้วนำทางไปหน้าแชท
+  Future<void> _handleChat() async {
+    if (!AuthSession.instance.isLoggedIn) {
+      _promptLogin();
+      return;
+    }
+
+    final storeId = _data?.product.storeId ?? 0;
+
+    try {
+      final conv = await _chatApi.getOrCreateConversation(
+        storeId: storeId > 0 ? storeId : null,
+      );
+
+      // ส่ง product context ทุกครั้งที่เปิดแชทจากหน้าสินค้า (เหมือน web)
+      // แต่ป้องกัน duplicate ด้วย _chatSentForProductId — ถ้ากด back แล้วกลับเข้าแชทใหม่
+      // ในหน้าเดิม จะไม่ส่งซ้ำ (เหมือน autoSentProductRef ฝั่ง web)
+      final productData = _data?.product;
+      if (productData != null && _chatSentForProductId != productData.id) {
+        _chatSentForProductId = productData.id;
+        final name = productData.displayName;
+        final price = _selectedVariant?.finalPrice ?? productData.minPrice;
+        final msg = 'สอบถามเกี่ยวกับสินค้า: $name\nราคา: ${_formatPrice(price)}';
+        try {
+          await _chatApi.sendMessage(conv.convId, msg);
+        } catch (_) {
+          // silent — ไม่ block การเปิดแชทถ้าส่ง context ไม่ได้
+        }
+      }
+
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ConversationMessagesPage(
+            conversation: conv,
+            controller: _chatController,
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่สามารถเปิดแชทได้ กรุณาลองใหม่')),
+      );
+    }
   }
 
-  void _handleAddToCart() {
+  // เพิ่มสินค้าลงตะกร้า — ต้อง login ก่อน, แสดง snackbar เมื่อสำเร็จ/ล้มเหลว
+  Future<void> _handleAddToCart() async {
     final variant = _selectedVariant;
     if (variant == null || variant.isOutOfStock) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('เพิ่ม ${variant.labelOrSku} ลงตะกร้าแล้ว')),
-    );
+    // ถ้ายังไม่ login ให้เด้งไปหน้า login ก่อน
+    if (!AuthSession.instance.isLoggedIn) {
+      _promptLogin();
+      return;
+    }
+
+    try {
+      await CartController.instance.addItem(
+        pvId: variant.id,
+        qty: 1,
+        lgCode: widget.language.code,
+      );
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      final navigator = Navigator.of(context);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('เพิ่ม ${variant.labelOrSku} ลงตะกร้าแล้ว'),
+          action: SnackBarAction(
+            label: 'ดูตะกร้า',
+            onPressed: () => navigator.push(
+              MaterialPageRoute(
+                builder: (_) => CartPage(lgCode: widget.language.code),
+              ),
+            ),
+          ),
+        ),
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('เกิดข้อผิดพลาด กรุณาลองใหม่')),
+      );
+    }
   }
 
-  void _handleBuyNow() {
+  // ซื้อเลย — เพิ่มลงตะกร้า, หา ci_id ของ item นั้น แล้วไป CheckoutPage ทันที
+  Future<void> _handleBuyNow() async {
     final variant = _selectedVariant;
-    if (variant == null || variant.isOutOfStock) return;
+    if (variant == null || variant.isOutOfStock || _buyingNow) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('ไปหน้าชำระเงิน: ${variant.labelOrSku}')),
+    if (!AuthSession.instance.isLoggedIn) {
+      _promptLogin();
+      return;
+    }
+
+    setState(() => _buyingNow = true);
+    try {
+      await CartController.instance.addItem(
+        pvId: variant.id,
+        qty: 1,
+        lgCode: widget.language.code,
+      );
+      if (!mounted) return;
+
+      final cartItem = CartController.instance.items
+          .where((i) => i.pvId == variant.id)
+          .firstOrNull;
+
+      if (cartItem == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('เกิดข้อผิดพลาด กรุณาลองใหม่')),
+        );
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CheckoutPage(
+            selectedCiIds: [cartItem.ciId],
+            selectedTotal: variant.finalPrice,
+          ),
+        ),
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('เกิดข้อผิดพลาด กรุณาลองใหม่')),
+      );
+    } finally {
+      if (mounted) setState(() => _buyingNow = false);
+    }
+  }
+
+  // แสดง snackbar พร้อม action ไปหน้า login
+  void _promptLogin() {
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: const Text('กรุณาเข้าสู่ระบบก่อน'),
+        action: SnackBarAction(
+          label: 'เข้าสู่ระบบ',
+          onPressed: () => navigator.push(
+            MaterialPageRoute(builder: (_) => const LoginPage()),
+          ),
+        ),
+      ),
     );
   }
 
@@ -562,6 +737,7 @@ class _ProductHeaderLogo extends StatelessWidget {
 class _ProductActionFooter extends StatelessWidget {
   const _ProductActionFooter({
     required this.isLoading,
+    required this.isBuyingNow,
     required this.variant,
     required this.onChat,
     required this.onAddToCart,
@@ -569,6 +745,7 @@ class _ProductActionFooter extends StatelessWidget {
   });
 
   final bool isLoading;
+  final bool isBuyingNow;
   final ProductVariant? variant;
   final VoidCallback onChat;
   final VoidCallback onAddToCart;
@@ -608,7 +785,7 @@ class _ProductActionFooter extends StatelessWidget {
                 icon: Icons.flash_on_outlined,
                 label: 'ซื้อเลย',
                 highlight: true,
-                onTap: disabled ? null : onBuyNow,
+                onTap: disabled || isBuyingNow ? null : onBuyNow,
               ),
             ],
           ),

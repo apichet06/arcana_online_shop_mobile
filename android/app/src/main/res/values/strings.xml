@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Arcana</string>
+    <string name="facebook_app_id">1246337184241566</string>
+    <string name="fb_login_protocol_scheme">fb1246337184241566</string>
+    <string name="facebook_client_token">333de319b218a708a6e9b55f78c8160f</string>
+</resources>

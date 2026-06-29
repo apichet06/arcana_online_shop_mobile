@@ -1,13 +1,29 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'package:arcana_online_shop_mobile/core/network/api_client.dart';
+import 'package:arcana_online_shop_mobile/features/cart/application/cart_controller.dart';
+import 'package:arcana_online_shop_mobile/features/cart/presentation/cart_page.dart';
 import 'package:arcana_online_shop_mobile/features/product_shop/data/product_shop_repository.dart';
 import 'package:arcana_online_shop_mobile/features/product_shop/domain/product.dart';
 import 'package:arcana_online_shop_mobile/features/product_shop/presentation/product_variant_page.dart';
 import 'package:arcana_online_shop_mobile/features/product_shop/presentation/widgets/product_card.dart';
 import 'package:arcana_online_shop_mobile/features/auth/data/auth_session.dart';
 import 'package:arcana_online_shop_mobile/features/auth/presentation/login_page.dart';
+import 'package:arcana_online_shop_mobile/features/chat/application/chat_controller.dart';
+import 'package:arcana_online_shop_mobile/features/chat/presentation/chat_tab.dart';
+import 'package:arcana_online_shop_mobile/features/coupons/data/coupons_api.dart';
+import 'package:arcana_online_shop_mobile/features/coupons/domain/coupon.dart';
+import 'package:arcana_online_shop_mobile/features/coupons/presentation/coupons_page.dart';
+import 'package:arcana_online_shop_mobile/features/notifications/application/buyer_notification_controller.dart';
+import 'package:arcana_online_shop_mobile/features/notifications/presentation/notifications_page.dart';
+import 'package:arcana_online_shop_mobile/features/address/presentation/address_page.dart';
+import 'package:arcana_online_shop_mobile/features/orders/presentation/order_list_page.dart';
+import 'package:arcana_online_shop_mobile/features/payment_methods/presentation/payment_methods_page.dart';
+import 'package:arcana_online_shop_mobile/features/profile/presentation/change_password_page.dart';
+import 'package:arcana_online_shop_mobile/features/profile/presentation/profile_page.dart';
 import 'package:arcana_online_shop_mobile/features/storefront/application/storefront_search_coordinator.dart';
 import 'package:arcana_online_shop_mobile/l10n/app_localizations.dart';
 
@@ -32,9 +48,14 @@ class StorefrontShellPage extends StatefulWidget {
 class _StorefrontShellPageState extends State<StorefrontShellPage> {
   // จำนวนสินค้าที่โหลดต่อ 1 หน้า ใช้กับ pagination/infinite scroll
   static const int _pageSize = 10;
+  static const MethodChannel _badgeChannel = MethodChannel('arcana/app_badge');
 
   // Repository ใช้เรียก API ของ storefront และสินค้า
   final ProductShopRepository _repository = ProductShopRepository();
+  final CouponsApi _couponsApi = CouponsApi();
+  final BuyerNotificationController _notificationController =
+      BuyerNotificationController();
+  final ChatController _chatController = ChatController();
   final StorefrontSearchCoordinator _searchCoordinator =
       StorefrontSearchCoordinator.instance;
   // Controller สำหรับฟังตำแหน่ง scroll เพื่อโหลดสินค้าเพิ่มเมื่อใกล้ท้ายหน้า
@@ -57,6 +78,10 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
   bool _isLoadingMore = false;
   Object? _loadError;
   int _loadRequestId = 0;
+  int? _lastSyncedAppBadgeCount;
+  List<Coupon> _availableCoupons = const [];
+  bool _couponsLoading = false;
+  int? _claimingCouponId;
 
   @override
   void initState() {
@@ -65,7 +90,13 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
     _selectedLanguage = widget.selectedLanguage;
     _scrollController.addListener(_handleScroll);
     _searchCoordinator.addListener(_focusSearch);
+    AuthSession.instance.addListener(_handleAuthChanged);
+    _notificationController.addListener(_refreshFooterBadges);
+    _chatController.addListener(_refreshFooterBadges);
     _loadInitialStorefront();
+    unawaited(_loadCoupons());
+    _notificationController.syncWithSession();
+    _chatController.syncWithSession();
   }
 
   @override
@@ -85,6 +116,11 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
   void dispose() {
     // ถอด listener และ dispose controller เพื่อกัน memory leak
     _searchCoordinator.removeListener(_focusSearch);
+    AuthSession.instance.removeListener(_handleAuthChanged);
+    _notificationController.removeListener(_refreshFooterBadges);
+    _chatController.removeListener(_refreshFooterBadges);
+    _notificationController.dispose();
+    _chatController.dispose();
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
@@ -92,6 +128,38 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
     _searchController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  void _handleAuthChanged() {
+    if (AuthSession.instance.isLoggedIn && _selectedFooterIndex != 0) {
+      setState(() => _selectedFooterIndex = 0);
+    }
+    _notificationController.syncWithSession();
+    _chatController.syncWithSession();
+    unawaited(_loadCoupons());
+  }
+
+  void _refreshFooterBadges() {
+    if (!mounted) return;
+    _syncAppBadge();
+    setState(() {});
+  }
+
+  void _syncAppBadge() {
+    final count =
+        _notificationController.unreadCount + _chatController.totalUnreadCount;
+    if (_lastSyncedAppBadgeCount == count) return;
+
+    _lastSyncedAppBadgeCount = count;
+    unawaited(_setAppBadge(count));
+  }
+
+  Future<void> _setAppBadge(int count) async {
+    try {
+      await _badgeChannel.invokeMethod<void>('setBadge', {'count': count});
+    } catch (_) {
+      // Android launcher badge support varies by device/launcher.
+    }
   }
 
   Future<void> _loadInitialStorefront() async {
@@ -137,6 +205,70 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
         _isInitialLoading = false;
       });
     }
+  }
+
+  Future<void> _loadCoupons() async {
+    if (!mounted) return;
+    setState(() => _couponsLoading = true);
+    try {
+      final coupons = await _couponsApi.fetchAvailableCoupons();
+      if (!mounted) return;
+      setState(() {
+        _availableCoupons = coupons;
+        _couponsLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _couponsLoading = false);
+    }
+  }
+
+  Future<void> _claimCoupon(Coupon coupon) async {
+    if (!AuthSession.instance.isLoggedIn) {
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const LoginPage()));
+      return;
+    }
+
+    setState(() => _claimingCouponId = coupon.coId);
+    try {
+      await _couponsApi.claimCoupon(coupon.coId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('เก็บคูปองสำเร็จ')));
+      await _loadCoupons();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e is ApiException ? e.message : 'เก็บคูปองไม่สำเร็จ'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _claimingCouponId = null);
+    }
+  }
+
+  Future<void> _openCouponsPage() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            CouponsPage(api: _couponsApi, language: _selectedLanguage),
+      ),
+    );
+    unawaited(_loadCoupons());
+  }
+
+  bool _couponMatchesSelectedType(Coupon coupon) {
+    final websiteKey = coupon.websiteKey;
+    if (websiteKey == null || websiteKey == 'combined') return true;
+    return switch (_selectedType) {
+      StorefrontType.arcana => websiteKey == 'arcana',
+      StorefrontType.deadstock => websiteKey == 'deadstock',
+    };
   }
 
   Future<void> _loadMoreProducts() async {
@@ -298,9 +430,25 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
               icon: const Icon(Icons.search),
               tooltip: 'Search',
             ),
+          // Cart icon พร้อม badge จำนวน item — rebuild อัตโนมัติเมื่อ cart เปลี่ยน
           IconButton(
-            onPressed: () {},
-            icon: const Icon(Icons.shopping_bag_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => CartPage(lgCode: _selectedLanguage.code),
+              ),
+            ),
+            icon: AnimatedBuilder(
+              animation: CartController.instance,
+              builder: (context, child) {
+                final count = CartController.instance.itemCount;
+                if (count <= 0) return child!;
+                return Badge.count(
+                  count: count > 99 ? 99 : count,
+                  child: child!,
+                );
+              },
+              child: const Icon(Icons.shopping_bag_outlined),
+            ),
             tooltip: 'Cart',
           ),
         ],
@@ -319,13 +467,25 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
             label: l10n.homeNavLabel,
           ),
           NavigationDestination(
-            icon: const Icon(Icons.notifications_outlined),
-            selectedIcon: const Icon(Icons.notifications),
+            icon: _NotificationNavIcon(
+              unreadCount: _notificationController.unreadCount,
+              selected: false,
+            ),
+            selectedIcon: _NotificationNavIcon(
+              unreadCount: _notificationController.unreadCount,
+              selected: true,
+            ),
             label: l10n.notificationsNavLabel,
           ),
           NavigationDestination(
-            icon: const Icon(Icons.chat_bubble_outline),
-            selectedIcon: const Icon(Icons.chat_bubble),
+            icon: _ChatNavIcon(
+              unreadCount: _chatController.totalUnreadCount,
+              selected: false,
+            ),
+            selectedIcon: _ChatNavIcon(
+              unreadCount: _chatController.totalUnreadCount,
+              selected: true,
+            ),
             label: l10n.chat,
           ),
           NavigationDestination(
@@ -342,12 +502,9 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
     // สลับเนื้อหาตาม bottom navigation
     switch (_selectedFooterIndex) {
       case 1:
-        return _EmptyMainTab(
-          icon: Icons.notifications_outlined,
-          title: l10n.notificationsTitle,
-        );
+        return NotificationsPage(controller: _notificationController);
       case 2:
-        return _EmptyMainTab(icon: Icons.chat_bubble_outline, title: l10n.chat);
+        return ChatTab(controller: _chatController);
       case 3:
         return const _AccountTab();
       case 0:
@@ -382,6 +539,14 @@ class _StorefrontShellPageState extends State<StorefrontShellPage> {
         ),
         const SizedBox(height: 18),
         _QuickActions(type: _selectedType),
+        const SizedBox(height: 22),
+        _CouponPreviewSection(
+          coupons: _availableCoupons.where(_couponMatchesSelectedType).toList(),
+          loading: _couponsLoading,
+          claimingCouponId: _claimingCouponId,
+          onClaim: _claimCoupon,
+          onViewAll: _openCouponsPage,
+        ),
         const SizedBox(height: 22),
         _ProductSearchField(
           controller: _searchController,
@@ -446,27 +611,45 @@ class _HeaderLogo extends StatelessWidget {
   }
 }
 
-class _EmptyMainTab extends StatelessWidget {
-  const _EmptyMainTab({required this.icon, required this.title});
+class _NotificationNavIcon extends StatelessWidget {
+  const _NotificationNavIcon({
+    required this.unreadCount,
+    required this.selected,
+  });
 
-  final IconData icon;
-  final String title;
+  final int unreadCount;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
-    // Placeholder สำหรับ tab ที่ยังไม่มีหน้าจริง เช่น notification/chat/profile
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 42, color: Theme.of(context).colorScheme.primary),
-            const SizedBox(height: 12),
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
-          ],
-        ),
-      ),
+    final icon = Icon(
+      selected ? Icons.notifications : Icons.notifications_outlined,
+    );
+    if (unreadCount <= 0) return icon;
+
+    return Badge.count(
+      count: unreadCount,
+      isLabelVisible: unreadCount > 0,
+      child: icon,
+    );
+  }
+}
+
+class _ChatNavIcon extends StatelessWidget {
+  const _ChatNavIcon({required this.unreadCount, required this.selected});
+
+  final int unreadCount;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = Icon(selected ? Icons.chat_bubble : Icons.chat_bubble_outline);
+    if (unreadCount <= 0) return icon;
+
+    return Badge.count(
+      count: unreadCount > 99 ? 99 : unreadCount,
+      isLabelVisible: unreadCount > 0,
+      child: icon,
     );
   }
 }
@@ -529,17 +712,37 @@ class _AccountTab extends StatelessWidget {
             _AccountMenuItem(
               icon: Icons.person_outline,
               title: 'ข้อมูลส่วนตัว',
-              onTap: () {},
+              onTap: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const ProfilePage())),
             ),
             _AccountMenuItem(
               icon: Icons.location_on_outlined,
               title: 'ที่อยู่จัดส่ง',
-              onTap: () {},
+              onTap: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const AddressPage())),
+            ),
+            _AccountMenuItem(
+              icon: Icons.credit_card_outlined,
+              title: 'บัตรชำระเงิน',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const PaymentMethodsPage()),
+              ),
+            ),
+            _AccountMenuItem(
+              icon: Icons.lock_outline,
+              title: 'เปลี่ยนรหัสผ่าน',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const ChangePasswordPage()),
+              ),
             ),
             _AccountMenuItem(
               icon: Icons.receipt_long_outlined,
               title: 'การซื้อของฉัน',
-              onTap: () {},
+              onTap: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const OrderListPage())),
             ),
             const SizedBox(height: 14),
             OutlinedButton.icon(
@@ -657,6 +860,8 @@ class _ProductSearchField extends StatelessWidget {
       onSubmitted: onSubmitted,
       decoration: InputDecoration(
         hintText: 'ค้นหาสินค้า',
+        filled: true,
+        fillColor: Colors.white,
         prefixIcon: const Icon(Icons.search),
         suffixIcon: ValueListenableBuilder<TextEditingValue>(
           valueListenable: controller,
@@ -668,6 +873,14 @@ class _ProductSearchField extends StatelessWidget {
               tooltip: 'Clear search',
             );
           },
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: Theme.of(context).colorScheme.primary),
         ),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
       ),
@@ -823,6 +1036,74 @@ class _QuickActions extends StatelessWidget {
               child: _QuickActionCard(item: item),
             ),
           ),
+      ],
+    );
+  }
+}
+
+class _CouponPreviewSection extends StatelessWidget {
+  const _CouponPreviewSection({
+    required this.coupons,
+    required this.loading,
+    required this.claimingCouponId,
+    required this.onClaim,
+    required this.onViewAll,
+  });
+
+  final List<Coupon> coupons;
+  final bool loading;
+  final int? claimingCouponId;
+  final ValueChanged<Coupon> onClaim;
+  final VoidCallback onViewAll;
+
+  @override
+  Widget build(BuildContext context) {
+    final previewCoupons = coupons.take(5).toList();
+    if (!loading && previewCoupons.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(
+              Icons.local_offer_outlined,
+              size: 18,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              'คูปองสำหรับคุณ',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const Spacer(),
+            TextButton(onPressed: onViewAll, child: const Text('ดูทั้งหมด')),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 90,
+          child: loading && previewCoupons.isEmpty
+              ? const Center(child: CircularProgressIndicator())
+              : ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: previewCoupons.length,
+                  separatorBuilder: (context, index) =>
+                      const SizedBox(width: 10),
+                  itemBuilder: (context, index) {
+                    final coupon = previewCoupons[index];
+                    return SizedBox(
+                      width: 292,
+                      child: CouponCard(
+                        coupon: coupon,
+                        compact: true,
+                        claiming: claimingCouponId == coupon.coId,
+                        onClaim: () => onClaim(coupon),
+                      ),
+                    );
+                  },
+                ),
+        ),
       ],
     );
   }

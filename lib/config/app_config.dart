@@ -17,6 +17,9 @@ class AppConfig {
         googleClientId;
   }
 
+  static String? get omisePublicKey =>
+      _firstEnvValue(['OMISE_PUBLIC_KEY', 'NEXT_PUBLIC_OMISE_PUBLIC_KEY']);
+
   static String? _firstEnvValue(List<String> keys) {
     for (final key in keys) {
       final value = dotenv.env[key]?.trim();

@@ -40,7 +40,7 @@ class ApiClient {
         path,
         data: data,
         queryParameters: _filteredQuery(queryParameters),
-        options: _authOptions(),
+        options: _authOptions(data: data),
       );
     });
   }
@@ -52,6 +52,21 @@ class ApiClient {
   }) async {
     return _send(() {
       return _dio.patch<dynamic>(
+        path,
+        data: data,
+        queryParameters: _filteredQuery(queryParameters),
+        options: _authOptions(),
+      );
+    });
+  }
+
+  Future<Map<String, dynamic>> put(
+    String path, {
+    Object? data,
+    Map<String, String?> queryParameters = const {},
+  }) async {
+    return _send(() {
+      return _dio.put<dynamic>(
         path,
         data: data,
         queryParameters: _filteredQuery(queryParameters),
@@ -97,11 +112,21 @@ class ApiClient {
     throw const FormatException('API response is not a JSON object');
   }
 
-  Options _authOptions() {
+  Options _authOptions({Object? data}) {
     final token = AuthSession.instance.accessToken;
-    if (token == null || token.isEmpty) return Options();
+    final headers = <String, String>{};
+    if (token != null && token.isNotEmpty) {
+      headers['Authorization'] = 'Bearer $token';
+    }
 
-    return Options(headers: {'Authorization': 'Bearer $token'});
+    final contentType = data is FormData
+        ? Headers.multipartFormDataContentType
+        : null;
+
+    return Options(
+      headers: headers.isEmpty ? null : headers,
+      contentType: contentType,
+    );
   }
 
   ApiException _toApiException(DioException error) {

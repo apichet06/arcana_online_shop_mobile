@@ -97,6 +97,20 @@ class AuthSession extends ChangeNotifier {
     return _refreshFuture!;
   }
 
+  // อัปเดต username ใน session หลังแก้โปรไฟล์สำเร็จ
+  // เซฟลง secure storage ด้วยเพื่อให้ชื่อถูกต้องแม้ restart แอป
+  Future<void> updateUsername(String username) async {
+    if (_user == null) return;
+    _user = AuthUser(
+      id: _user!.id,
+      username: username,
+      email: _user!.email,
+      avatar: _user!.avatar,
+    );
+    await _storage.write(key: _userKey, value: jsonEncode(_user!.toJson()));
+    notifyListeners();
+  }
+
   Future<void> logout() async {
     try {
       final cookie = _refreshCookie;

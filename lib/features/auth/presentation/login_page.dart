@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import 'package:arcana_online_shop_mobile/config/app_config.dart';
@@ -45,8 +46,7 @@ class _LoginPageState extends State<LoginPage> {
         email: _emailController.text.trim(),
         password: _passwordController.text,
       );
-      if (!mounted) return;
-      Navigator.of(context).pop(true);
+      _completeLogin();
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -83,8 +83,45 @@ class _LoginPageState extends State<LoginPage> {
       await AuthSession.instance.loginWithGoogleAccessToken(
         authorization.accessToken,
       );
+      _completeLogin();
+    } catch (error) {
       if (!mounted) return;
-      Navigator.of(context).pop(true);
+      setState(() {
+        _errorMessage = _messageFromError(error);
+        _submitting = false;
+      });
+    }
+  }
+
+  Future<void> _loginWithFacebook() async {
+    setState(() {
+      _submitting = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final result = await FacebookAuth.instance.login(
+        permissions: const ['email', 'public_profile'],
+        loginTracking: LoginTracking.enabled,
+      );
+
+      switch (result.status) {
+        case LoginStatus.success:
+          final accessToken = result.accessToken?.tokenString;
+          if (accessToken == null || accessToken.isEmpty) {
+            throw Exception('ไม่พบ access token จาก Facebook');
+          }
+
+          await AuthSession.instance.loginWithFacebookAccessToken(accessToken);
+          _completeLogin();
+          return;
+        case LoginStatus.cancelled:
+          throw Exception('ยกเลิกการเข้าสู่ระบบด้วย Facebook');
+        case LoginStatus.operationInProgress:
+          throw Exception('กำลังเข้าสู่ระบบด้วย Facebook อยู่');
+        case LoginStatus.failed:
+          throw Exception(result.message ?? 'เข้าสู่ระบบด้วย Facebook ไม่สำเร็จ');
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -130,6 +167,8 @@ class _LoginPageState extends State<LoginPage> {
       }
       return error.description ?? 'เข้าสู่ระบบด้วย Google ไม่สำเร็จ';
     }
+    final message = error.toString().replaceFirst('Exception: ', '').trim();
+    if (message.isNotEmpty && message != 'null') return message;
     return 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง';
   }
 
@@ -251,9 +290,7 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                   const SizedBox(height: 10),
                   OutlinedButton.icon(
-                    onPressed: _submitting
-                        ? null
-                        : () => _showSocialLoginPending('Facebook'),
+                    onPressed: _submitting ? null : _loginWithFacebook,
                     icon: const Icon(Icons.facebook),
                     label: const Text('เข้าสู่ระบบด้วย Facebook'),
                   ),
@@ -266,21 +303,16 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  void _showSocialLoginPending(String provider) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'ต้องต่อ native $provider OAuth เพื่อรับ access token ก่อนเรียก API',
-        ),
-      ),
-    );
-  }
-
   Future<void> _openRegister() async {
     final registered = await Navigator.of(
       context,
     ).push<bool>(MaterialPageRoute(builder: (_) => const RegisterPage()));
     if (!mounted) return;
-    if (registered == true) Navigator.of(context).pop(true);
+    if (registered == true) _completeLogin();
+  }
+
+  void _completeLogin() {
+    if (!mounted) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
   }
 }

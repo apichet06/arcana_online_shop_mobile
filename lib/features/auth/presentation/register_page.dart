@@ -1,6 +1,8 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'package:arcana_online_shop_mobile/core/widgets/location_picker_field.dart';
 import 'package:arcana_online_shop_mobile/features/auth/data/address_lookup_api.dart';
 import 'package:arcana_online_shop_mobile/features/auth/data/auth_session.dart';
 
@@ -343,7 +345,13 @@ class _RegisterPageState extends State<RegisterPage> {
           controller: _phoneController,
           keyboardType: TextInputType.phone,
           textInputAction: TextInputAction.next,
-          decoration: const InputDecoration(labelText: 'เบอร์โทรศัพท์'),
+          maxLength: 12,
+          buildCounter: (_, {required currentLength, required isFocused, maxLength}) => null,
+          inputFormatters: [_ThaiPhoneFormatter()],
+          decoration: const InputDecoration(
+            labelText: 'เบอร์โทรศัพท์',
+            hintText: '081-234-5678',
+          ),
           validator: (value) {
             final digits = (value ?? '').replaceAll(RegExp(r'\D'), '');
             if (!RegExp(r'^0\d{9}$').hasMatch(digits)) {
@@ -364,25 +372,42 @@ class _RegisterPageState extends State<RegisterPage> {
           },
         ),
         const SizedBox(height: 12),
-        _LocationDropdown(
+        LocationPickerField(
           label: 'จังหวัด',
-          value: _selectedProvince,
+          selectedName: _selectedProvince?.name,
           options: _provinces,
-          onChanged: _selectProvince,
+          loading: false,
+          placeholder: 'เลือกจังหวัด',
+          searchHint: 'ค้นหาจังหวัด...',
+          onSelected: (opt) => _selectProvince(opt),
+          validator: (_) =>
+              _selectedProvince == null ? 'กรุณาเลือกจังหวัด' : null,
         ),
         const SizedBox(height: 12),
-        _LocationDropdown(
-          label: 'อำเภอ/เขต',
-          value: _selectedDistrict,
+        LocationPickerField(
+          label: 'อำเภอ / เขต',
+          selectedName: _selectedDistrict?.name,
           options: _districts,
-          onChanged: _selectedProvince == null ? null : _selectDistrict,
+          loading: false,
+          enabled: _selectedProvince != null,
+          placeholder: _selectedProvince == null ? 'เลือกจังหวัดก่อน' : 'เลือกอำเภอ',
+          searchHint: 'ค้นหาอำเภอ...',
+          onSelected: (opt) => _selectDistrict(opt),
+          validator: (_) =>
+              _selectedDistrict == null ? 'กรุณาเลือกอำเภอ' : null,
         ),
         const SizedBox(height: 12),
-        _LocationDropdown(
-          label: 'ตำบล/แขวง',
-          value: _selectedSubdistrict,
+        LocationPickerField(
+          label: 'ตำบล / แขวง',
+          selectedName: _selectedSubdistrict?.name,
           options: _subdistricts,
-          onChanged: _selectedDistrict == null ? null : _selectSubdistrict,
+          loading: false,
+          enabled: _selectedDistrict != null,
+          placeholder: _selectedDistrict == null ? 'เลือกอำเภอก่อน' : 'เลือกตำบล',
+          searchHint: 'ค้นหาตำบล...',
+          onSelected: (opt) => _selectSubdistrict(opt),
+          validator: (_) =>
+              _selectedSubdistrict == null ? 'กรุณาเลือกตำบล' : null,
         ),
         const SizedBox(height: 12),
         TextFormField(
@@ -401,30 +426,26 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 }
 
-class _LocationDropdown extends StatelessWidget {
-  const _LocationDropdown({
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.onChanged,
-  });
-
-  final String label;
-  final LocationOption? value;
-  final List<LocationOption> options;
-  final ValueChanged<LocationOption?>? onChanged;
-
+// Formatter แปลงตัวเลขเป็นรูปแบบ XXX-XXX-XXXX ขณะพิมพ์
+class _ThaiPhoneFormatter extends TextInputFormatter {
   @override
-  Widget build(BuildContext context) {
-    return DropdownButtonFormField<LocationOption>(
-      value: value,
-      isExpanded: true,
-      decoration: InputDecoration(labelText: label),
-      items: [
-        for (final option in options)
-          DropdownMenuItem(value: option, child: Text(option.name)),
-      ],
-      onChanged: onChanged,
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final digits = newValue.text.replaceAll(RegExp(r'\D'), '');
+    if (digits.isEmpty) return newValue.copyWith(text: '');
+
+    final buffer = StringBuffer();
+    for (int i = 0; i < digits.length && i < 10; i++) {
+      if (i == 3 || i == 6) buffer.write('-');
+      buffer.write(digits[i]);
+    }
+
+    final formatted = buffer.toString();
+    return TextEditingValue(
+      text: formatted,
+      selection: TextSelection.collapsed(offset: formatted.length),
     );
   }
 }
