@@ -31,7 +31,7 @@ import 'package:arcana_online_shop_mobile/features/payment_methods/presentation/
 final _baht = NumberFormat('#,##0.00', 'th');
 String _fmt(double v) => '฿${_baht.format(v)}';
 
-enum _PayMode { promptPay, savedCard }
+enum _PayMode { promptPay, savedCard, kbankMobileBanking, scbMobileBanking }
 
 class CheckoutPage extends StatefulWidget {
   const CheckoutPage({
@@ -354,24 +354,21 @@ class _CheckoutPageState extends State<CheckoutPage> {
     try {
       CheckoutResult result;
 
-      if (_payMode == _PayMode.promptPay) {
-        result = await _checkoutApi.checkout(
-          locbId: _selectedAddress!.id,
-          coCode: _coupon?.coCode,
-          shippingScId: _selectedShipping?.scId,
-          paymentMethod: 'promptpay',
-          selectedCiIds: widget.selectedCiIds,
-        );
-      } else {
-        result = await _checkoutApi.checkout(
-          locbId: _selectedAddress!.id,
-          coCode: _coupon?.coCode,
-          shippingScId: _selectedShipping?.scId,
-          paymentMethod: 'card',
-          savedPaymentMethodId: _selectedCardId,
-          selectedCiIds: widget.selectedCiIds,
-        );
-      }
+      result = await _checkoutApi.checkout(
+        locbId: _selectedAddress!.id,
+        coCode: _coupon?.coCode,
+        shippingScId: _selectedShipping?.scId,
+        paymentMethod: switch (_payMode) {
+          _PayMode.promptPay => 'promptpay',
+          _PayMode.savedCard => 'card',
+          _PayMode.kbankMobileBanking => 'mobile_banking_kbank',
+          _PayMode.scbMobileBanking => 'mobile_banking_scb',
+        },
+        savedPaymentMethodId: _payMode == _PayMode.savedCard
+            ? _selectedCardId
+            : null,
+        selectedCiIds: widget.selectedCiIds,
+      );
 
       if (!mounted) return;
       await CartController.instance.refresh();
@@ -404,6 +401,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
           builder: (_) => _AuthorizeWebView(
             url: payment.authorizeUri!,
             orders: result.orders,
+            checkoutApi: _checkoutApi,
             ordersApi: _ordersApi,
           ),
         ),
@@ -589,6 +587,10 @@ class _CheckoutPageState extends State<CheckoutPage> {
                     selectedCardId: _selectedCardId,
                     onSelectPromptPay: () =>
                         setState(() => _payMode = _PayMode.promptPay),
+                    onSelectKbankMobileBanking: () =>
+                        setState(() => _payMode = _PayMode.kbankMobileBanking),
+                    onSelectScbMobileBanking: () =>
+                        setState(() => _payMode = _PayMode.scbMobileBanking),
                     onSelectCard: (id) => setState(() {
                       _payMode = _PayMode.savedCard;
                       _selectedCardId = id;
@@ -1075,6 +1077,8 @@ class _PaymentSection extends StatelessWidget {
     required this.payMode,
     required this.selectedCardId,
     required this.onSelectPromptPay,
+    required this.onSelectKbankMobileBanking,
+    required this.onSelectScbMobileBanking,
     required this.onSelectCard,
     required this.onAddCard,
   });
@@ -1083,6 +1087,8 @@ class _PaymentSection extends StatelessWidget {
   final _PayMode payMode;
   final int? selectedCardId;
   final VoidCallback onSelectPromptPay;
+  final VoidCallback onSelectKbankMobileBanking;
+  final VoidCallback onSelectScbMobileBanking;
   final ValueChanged<int> onSelectCard;
   final VoidCallback onAddCard;
 
@@ -1090,6 +1096,8 @@ class _PaymentSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final selectedPaymentValue = switch (payMode) {
       _PayMode.promptPay => 'promptPay',
+      _PayMode.kbankMobileBanking => 'mobileBanking:kbank',
+      _PayMode.scbMobileBanking => 'mobileBanking:scb',
       _PayMode.savedCard =>
         selectedCardId != null ? 'card:$selectedCardId' : null,
     };
@@ -1101,6 +1109,14 @@ class _PaymentSection extends StatelessWidget {
           if (value == null) return;
           if (value == 'promptPay') {
             onSelectPromptPay();
+            return;
+          }
+          if (value == 'mobileBanking:kbank') {
+            onSelectKbankMobileBanking();
+            return;
+          }
+          if (value == 'mobileBanking:scb') {
+            onSelectScbMobileBanking();
             return;
           }
 
@@ -1126,6 +1142,70 @@ class _PaymentSection extends StatelessWidget {
                   ),
                   const SizedBox(width: 6),
                   const Text('PromptPay (QR Code)'),
+                ],
+              ),
+            ),
+            RadioListTile<String>(
+              value: 'mobileBanking:kbank',
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Row(
+                children: [
+                  const Icon(
+                    Icons.account_balance_outlined,
+                    size: 20,
+                    color: Color(0xFF138F2D),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('K PLUS / กสิกรไทย'),
+                        Text(
+                          'ไปยังแอปหรือหน้าชำระเงินของธนาคาร',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            RadioListTile<String>(
+              value: 'mobileBanking:scb',
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Row(
+                children: [
+                  const Icon(
+                    Icons.account_balance_outlined,
+                    size: 20,
+                    color: Color(0xFF4E2A84),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('SCB EASY / ไทยพาณิชย์'),
+                        Text(
+                          'ไปยังแอปหรือหน้าชำระเงินของธนาคาร',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -1612,11 +1692,13 @@ class _AuthorizeWebView extends StatefulWidget {
   const _AuthorizeWebView({
     required this.url,
     required this.orders,
+    required this.checkoutApi,
     required this.ordersApi,
   });
 
   final String url;
   final List<Order> orders;
+  final CheckoutApi checkoutApi;
   final OrdersApi ordersApi;
 
   @override
@@ -1639,7 +1721,7 @@ class _AuthorizeWebViewState extends State<_AuthorizeWebView> {
             final url = change.url ?? '';
             if (!_done && url.contains('arcana') && url.contains('callback')) {
               _done = true;
-              _finish();
+              unawaited(_finish());
             }
           },
         ),
@@ -1647,19 +1729,41 @@ class _AuthorizeWebViewState extends State<_AuthorizeWebView> {
       ..loadRequest(Uri.parse(widget.url));
   }
 
-  void _finish() {
+  Future<void> _finish() async {
+    for (final order in widget.orders) {
+      try {
+        await widget.checkoutApi.syncPromptPayCharge(order.orId);
+      } catch (_) {
+        // Webhook may already have handled it, or the charge may still be pending.
+      }
+    }
+
     if (!mounted) return;
     Navigator.of(context).popUntil((r) => r.isFirst);
     if (widget.orders.isNotEmpty) {
+      final latestOrder = await _fetchLatestOrder(widget.orders.first);
+      if (!mounted) return;
       Navigator.push(
         context,
         MaterialPageRoute(
           builder: (_) => OrderDetailPage(
-            order: widget.orders.first,
+            order: latestOrder,
             api: widget.ordersApi,
           ),
         ),
       );
+    }
+  }
+
+  Future<Order> _fetchLatestOrder(Order fallback) async {
+    try {
+      final latestOrders = await widget.ordersApi.fetchOrders('th');
+      return latestOrders.firstWhere(
+        (order) => order.orId == fallback.orId,
+        orElse: () => fallback,
+      );
+    } catch (_) {
+      return fallback;
     }
   }
 

@@ -159,6 +159,7 @@ class _OrderDetailPageState extends State<OrderDetailPage>
   bool _paying = false;
   bool _reordering = false;
   bool _refreshingOrder = false;
+  bool _reviewing = false;
   Timer? _autoRefreshTimer;
 
   @override
@@ -469,6 +470,45 @@ class _OrderDetailPageState extends State<OrderDetailPage>
     }
   }
 
+  Future<void> _showReviewDialog() async {
+    if (_reviewing) return;
+    if (_items.isEmpty) {
+      await _loadItems();
+      if (!mounted || _items.isEmpty) return;
+    }
+
+    if (_items.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่พบรายการสินค้าสำหรับรีวิว')),
+      );
+      return;
+    }
+
+    setState(() => _reviewing = true);
+    final completed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _ReviewDialog(
+        api: widget.api,
+        items: _items,
+        resolveImageUrl: _client.resolveAssetUrl,
+      ),
+    );
+    if (!mounted) return;
+    setState(() => _reviewing = false);
+
+    if (completed == true) {
+      await _refreshOrder();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('บันทึกรีวิวเรียบร้อยแล้ว'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
   Future<void> _reorder() async {
     if (_reordering) return;
     if (_items.isEmpty) {
@@ -554,6 +594,13 @@ class _OrderDetailPageState extends State<OrderDetailPage>
           OrderStatusCode.reviewed,
         }.contains(statusCode) &&
         (_items.isNotEmpty || !_loadingItems);
+    final canReview =
+        {
+          OrderStatusCode.received,
+          OrderStatusCode.autoReceived,
+        }.contains(statusCode) &&
+        !_loadingItems &&
+        _items.isNotEmpty;
 
     return PopScope<Order>(
       canPop: false,
@@ -832,6 +879,7 @@ class _OrderDetailPageState extends State<OrderDetailPage>
                     canCancel ||
                     canRequestRefund ||
                     canConfirmReceived ||
+                    canReview ||
                     canReorder) ...[
                   const SizedBox(height: 20),
                   if (canReorder)
@@ -855,6 +903,33 @@ class _OrderDetailPageState extends State<OrderDetailPage>
                       ),
                     ),
                   if (canReorder &&
+                      (canPayPromptPay ||
+                          canConfirmReceived ||
+                          canReview ||
+                          canCancel ||
+                          canRequestRefund))
+                    const SizedBox(height: 10),
+                  if (canReview)
+                    FilledButton.icon(
+                      onPressed: _reviewing ? null : _showReviewDialog,
+                      icon: _reviewing
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.star_outline),
+                      label: Text(_reviewing ? 'กำลังเปิดรีวิว...' : 'รีวิวสินค้า'),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(48),
+                        backgroundColor: Colors.amber.shade700,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  if (canReview &&
                       (canPayPromptPay ||
                           canConfirmReceived ||
                           canCancel ||
@@ -1819,6 +1894,431 @@ class _RefundStatusNotice extends StatelessWidget {
   }
 }
 
+class _ReviewDialog extends StatefulWidget {
+  const _ReviewDialog({
+    required this.api,
+    required this.items,
+    required this.resolveImageUrl,
+  });
+
+  final OrdersApi api;
+  final List<OrderItem> items;
+  final String Function(String? value) resolveImageUrl;
+
+  @override
+  State<_ReviewDialog> createState() => _ReviewDialogState();
+}
+
+class _ReviewDialogState extends State<_ReviewDialog> {
+  final _messageController = TextEditingController();
+  final _picker = ImagePicker();
+  final List<XFile> _images = [];
+  int _step = 0;
+  int _productScore = 5;
+  int _deliveryScore = 5;
+  bool _submitting = false;
+  String? _messageErrorText;
+
+  OrderItem get _item => widget.items[_step];
+
+  @override
+  void dispose() {
+    _messageController.dispose();
+    super.dispose();
+  }
+
+  void _resetForm() {
+    _messageController.clear();
+    _images.clear();
+    _productScore = 5;
+    _deliveryScore = 5;
+    _messageErrorText = null;
+  }
+
+  Future<void> _showImageSourceSheet() async {
+    if (_images.length >= 5 || _submitting) return;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('ถ่ายรูป'),
+                onTap: () => Navigator.of(context).pop(ImageSource.camera),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('เลือกรูปจากเครื่อง'),
+                onTap: () => Navigator.of(context).pop(ImageSource.gallery),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (source == null || !mounted) return;
+    if (source == ImageSource.camera) {
+      await _pickFromCamera();
+    } else {
+      await _pickFromGallery();
+    }
+  }
+
+  Future<void> _pickFromCamera() async {
+    final picked = await _picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 85,
+      maxWidth: 1600,
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _images.add(picked);
+      _trimImages();
+    });
+  }
+
+  Future<void> _pickFromGallery() async {
+    final picked = await _picker.pickMultiImage(
+      imageQuality: 85,
+      maxWidth: 1600,
+    );
+    if (picked.isEmpty || !mounted) return;
+    setState(() {
+      _images.addAll(picked.take(5 - _images.length));
+      _trimImages();
+    });
+  }
+
+  void _trimImages() {
+    if (_images.length > 5) {
+      _images.removeRange(5, _images.length);
+    }
+  }
+
+  Future<void> _submitCurrent() async {
+    final message = _messageController.text.trim();
+    if (message.isEmpty) {
+      setState(() => _messageErrorText = 'กรุณาเขียนรีวิวสินค้า');
+      return;
+    }
+
+    setState(() => _submitting = true);
+    try {
+      await widget.api.submitReview(
+        pvId: _item.pvId,
+        oiId: _item.oiId,
+        message: message,
+        productScore: _productScore,
+        deliveryScore: _deliveryScore,
+        imagePaths: _images.map((image) => image.path).toList(),
+      );
+      if (!mounted) return;
+
+      final nextStep = _step + 1;
+      if (nextStep < widget.items.length) {
+        setState(() {
+          _step = nextStep;
+          _resetForm();
+          _submitting = false;
+        });
+      } else {
+        Navigator.of(context).pop(true);
+      }
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message), backgroundColor: Colors.red),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('บันทึกรีวิวไม่สำเร็จ: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final imageUrl = widget.resolveImageUrl(_item.imageUrl);
+    final total = widget.items.length;
+
+    return AlertDialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 24),
+      title: Row(
+        children: [
+          Icon(Icons.star_outline, color: Colors.amber.shade700),
+          const SizedBox(width: 8),
+          Expanded(child: Text('รีวิวสินค้า ${_step + 1}/$total')),
+        ],
+      ),
+      contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: imageUrl.isNotEmpty
+                        ? Image.network(
+                            imageUrl,
+                            width: 58,
+                            height: 58,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) =>
+                                const _PlaceholderThumb(size: 58),
+                          )
+                        : const _PlaceholderThumb(size: 58),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _item.productName,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                          ),
+                        ),
+                        if ((_item.variantName ?? '').isNotEmpty)
+                          Text(
+                            _item.variantName!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: colorScheme.onSurfaceVariant,
+                              fontSize: 12,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              _StarSelector(
+                label: 'คะแนนสินค้า',
+                value: _productScore,
+                onChanged: (value) => setState(() => _productScore = value),
+              ),
+              const SizedBox(height: 12),
+              _StarSelector(
+                label: 'คะแนนการจัดส่ง',
+                value: _deliveryScore,
+                onChanged: (value) => setState(() => _deliveryScore = value),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _messageController,
+                minLines: 3,
+                maxLines: 5,
+                maxLength: 500,
+                textInputAction: TextInputAction.newline,
+                decoration: InputDecoration(
+                  hintText: 'แบ่งปันความคิดเห็นเกี่ยวกับสินค้านี้',
+                  errorText: _messageErrorText,
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onChanged: (_) {
+                  if (_messageErrorText != null) {
+                    setState(() => _messageErrorText = null);
+                  }
+                },
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Text(
+                    'รูปภาพประกอบ',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                  ),
+                  Text(
+                    '  (${_images.length}/5)',
+                    style: TextStyle(
+                      color: colorScheme.primary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  ...List.generate(_images.length, (index) {
+                    final image = _images[index];
+                    return Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.file(
+                            File(image.path),
+                            width: 72,
+                            height: 72,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        Positioned(
+                          top: -8,
+                          right: -8,
+                          child: IconButton.filled(
+                            onPressed: _submitting
+                                ? null
+                                : () => setState(() => _images.removeAt(index)),
+                            icon: const Icon(Icons.close, size: 14),
+                            constraints: const BoxConstraints.tightFor(
+                              width: 28,
+                              height: 28,
+                            ),
+                            padding: EdgeInsets.zero,
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.black87,
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  }),
+                  if (_images.length < 5)
+                    InkWell(
+                      onTap: _submitting ? null : _showImageSourceSheet,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: colorScheme.outlineVariant),
+                          color: colorScheme.surfaceContainerHighest,
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.add_photo_alternate_outlined,
+                              color: colorScheme.primary,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'เพิ่มรูป',
+                              style: TextStyle(
+                                color: colorScheme.primary,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'รูปภาพไม่บังคับ แนบได้สูงสุด 5 รูป',
+                style: TextStyle(
+                  color: colorScheme.onSurfaceVariant,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _submitting ? null : () => Navigator.of(context).pop(false),
+          child: const Text('ปิด'),
+        ),
+        FilledButton.icon(
+          onPressed: _submitting ? null : _submitCurrent,
+          icon: _submitting
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.send_outlined, size: 18),
+          label: Text(
+            _submitting
+                ? 'กำลังส่ง...'
+                : _step + 1 < total
+                ? 'ส่งและรีวิวถัดไป'
+                : 'ส่งรีวิว',
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StarSelector extends StatelessWidget {
+  const _StarSelector({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+          ),
+        ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(5, (index) {
+            final score = index + 1;
+            return IconButton(
+              onPressed: () => onChanged(score),
+              icon: Icon(
+                score <= value ? Icons.star : Icons.star_border,
+                color: Colors.amber.shade600,
+              ),
+              constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+              padding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+            );
+          }),
+        ),
+      ],
+    );
+  }
+}
+
 // ─── Cancel dialog ───────────────────────────────────────────────────────────
 
 class _CancelDialog extends StatefulWidget {
@@ -1932,6 +2432,7 @@ class _RefundRequestDialogState extends State<_RefundRequestDialog> {
   final List<XFile> _images = [];
   String? _errorText;
   String? _imageErrorText;
+  String? _trackingErrorText;
 
   @override
   void dispose() {
@@ -2007,6 +2508,7 @@ class _RefundRequestDialogState extends State<_RefundRequestDialog> {
 
   void _submit() {
     final reason = _reasonController.text.trim();
+    final tracking = _trackingController.text.trim();
     if (reason.length < 5) {
       setState(() => _errorText = 'กรุณาระบุเหตุผลอย่างน้อย 5 ตัวอักษร');
       return;
@@ -2015,10 +2517,14 @@ class _RefundRequestDialogState extends State<_RefundRequestDialog> {
       setState(() => _imageErrorText = 'กรุณาแนบรูปถ่ายประกอบอย่างน้อย 1 รูป');
       return;
     }
+    if (tracking.length < 3) {
+      setState(() => _trackingErrorText = 'กรุณาระบุเลข Tracking พัสดุที่ส่งคืน');
+      return;
+    }
     Navigator.of(context).pop(
       _RefundRequestPayload(
         reason: reason,
-        returnTracking: _trackingController.text.trim(),
+        returnTracking: tracking,
         imagePaths: _images.map((image) => image.path).toList(),
       ),
     );
@@ -2198,21 +2704,30 @@ class _RefundRequestDialogState extends State<_RefundRequestDialog> {
               ),
               const SizedBox(height: 16),
               const Text(
-                'เลข Tracking พัสดุที่ส่งคืน (ถ้ามี)',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                'เลข Tracking พัสดุที่ส่งคืน *',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
               ),
               const SizedBox(height: 8),
               TextField(
                 controller: _trackingController,
-                decoration: const InputDecoration(
-                  hintText: 'กรอกเมื่อมีเลขพัสดุส่งคืน',
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  hintText: 'กรอกเลขพัสดุที่ส่งคืนสินค้า',
+                  errorText: _trackingErrorText,
+                  border: const OutlineInputBorder(),
                   isDense: true,
                 ),
+                onChanged: (_) {
+                  if (_trackingErrorText != null) {
+                    setState(() => _trackingErrorText = null);
+                  }
+                },
               ),
               const SizedBox(height: 12),
               Text(
-                'การส่งคำขอนี้ยังไม่ใช่การคืนเงินทันที ร้านค้าจะตรวจสอบสินค้าและคำขอก่อนอนุมัติ',
+                'ต้องส่งเลข Tracking ให้ร้านค้าตรวจสอบและยืนยันรับสินค้าคืนก่อนดำเนินการคืนเงิน',
                 style: TextStyle(
                   color: colorScheme.onSurfaceVariant,
                   fontSize: 11,

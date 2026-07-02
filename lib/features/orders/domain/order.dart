@@ -40,7 +40,8 @@ class OrderItem {
       originalUnitPrice: _toDoubleNullable(json['original_unit_price']),
       originalLineTotal: _toDoubleNullable(json['original_line_total']),
       discountAmount: _toDoubleNullable(json['discount_amount']),
-      storeName: json['store_name'] as String? ?? json['st_company_name'] as String?,
+      storeName:
+          json['store_name'] as String? ?? json['st_company_name'] as String?,
     );
   }
 }

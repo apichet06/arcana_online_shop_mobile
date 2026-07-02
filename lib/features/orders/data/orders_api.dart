@@ -101,6 +101,33 @@ class OrdersApi {
     );
     return Order.fromJson(res['data'] as Map<String, dynamic>);
   }
+
+  Future<void> submitReview({
+    required int pvId,
+    required int oiId,
+    required String message,
+    required int productScore,
+    required int deliveryScore,
+    List<String> imagePaths = const [],
+  }) async {
+    final formData = FormData.fromMap({
+      'pv_id': pvId,
+      'oi_id': oiId,
+      'massages': message,
+      'product_score': productScore,
+      'delivery_score': deliveryScore,
+    });
+    for (final path in imagePaths) {
+      formData.files.add(
+        MapEntry(
+          'images',
+          await MultipartFile.fromFile(path, filename: _fileName(path)),
+        ),
+      );
+    }
+
+    await _client.post(ApiPaths.reviews, data: formData);
+  }
 }
 
 String _fileName(String path) => path.split(RegExp(r'[\\/]')).last;
